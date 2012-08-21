@@ -1,3 +1,4 @@
+#include <avr/pgmspace.h>
 #if (ARDUINO >= 100)
  #include <Arduino.h>
 #else
@@ -14,17 +15,22 @@ class LPD8806 {
   LPD8806(void); // Empty constructor; init pins & strip length later
   void
     begin(void),
-    show(void),
-    setPixelColor(uint16_t n, uint8_t r, uint8_t g, uint8_t b),
-    setPixelColor(uint16_t n, uint32_t c),
     updatePins(uint8_t dpin, uint8_t cpin), // Change pins, configurable
-    updatePins(void),                       // Change pins, hardware SPI
-    updateLength(uint16_t n);               // Change strip length
+    updatePins(void), // Change pins, hardware SPI
+    updateLength(uint16_t n), // Change strip length
+    show(void),
+    clear(void), // clears pixel buffer
+    setPixelColor(uint16_t n, uint32_t c),
+    setPixelColor(uint16_t n, uint8_t r, uint8_t g, uint8_t b),
+    blendPixel(uint16_t pos, uint32_t color, uint8_t alpha=0xff),
+    blendSubpixel(uint32_t pos, uint32_t color, uint8_t alpha=0xff);
   uint16_t
     numPixels(void);
   uint32_t
-    Color(byte, byte, byte),
-    getPixelColor(uint16_t n);
+    packRGB(uint32_t),
+    Color(uint8_t, uint8_t, uint8_t),
+    getPixelColor(uint16_t n),
+    blendColor(uint32_t dest, uint32_t src, uint8_t alpha=0xff);
 
  private:
 
@@ -32,15 +38,18 @@ class LPD8806 {
     numLEDs,    // Number of RGB LEDs in strip
     numBytes;   // Size of 'pixels' buffer below
   uint8_t
-    *pixels,    // Holds LED color values (3 bytes each) + latch
+    *pixels,     // Holds LED color values (4 bytes each) + latch
     clkpin    , datapin,     // Clock & data pin numbers
-    clkpinmask, datapinmask; // Clock & data PORT bitmasks
+    clkpinmask, datapinmask, // Clock & data PORT bitmasks
+    latchBytes, // Number of blanks to send on latch
+    gamma(uint8_t x);
   volatile uint8_t
     *clkport  , *dataport;   // Clock & data PORT registers
   void
     startBitbang(void),
     startSPI(void);
-  boolean
+  bool
     hardwareSPI, // If 'true', using hardware SPI
     begun;       // If 'true', begin() method was previously invoked
+
 };

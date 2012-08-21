@@ -64,11 +64,30 @@ a 'latch' anyway.
   Tested.  Confirmed.  Fact.
 */
 
-
 #include "SPI.h"
 #include "LPD8806.h"
 
 /*****************************************************************************/
+
+// gamma lookup table, stolen from LEDbeltKit_alt example
+PROGMEM prog_uchar gammaTable[] = {
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  3,  3,  3,  3,  3,  3,  3,  3,  4,  4,  4,
+    4,  4,  4,  4,  5,  5,  5,  5,  5,  6,  6,  6,  6,  6,  7,  7,
+    7,  7,  7,  8,  8,  8,  8,  9,  9,  9,  9, 10, 10, 10, 10, 11,
+   11, 11, 12, 12, 12, 13, 13, 13, 13, 14, 14, 14, 15, 15, 16, 16,
+   16, 17, 17, 17, 18, 18, 18, 19, 19, 20, 20, 21, 21, 21, 22, 22,
+   23, 23, 24, 24, 24, 25, 25, 26, 26, 27, 27, 28, 28, 29, 29, 30,
+   30, 31, 32, 32, 33, 33, 34, 34, 35, 35, 36, 37, 37, 38, 38, 39,
+   40, 40, 41, 41, 42, 43, 43, 44, 45, 45, 46, 47, 47, 48, 49, 50,
+   50, 51, 52, 52, 53, 54, 55, 55, 56, 57, 58, 58, 59, 60, 61, 62,
+   62, 63, 64, 65, 66, 67, 67, 68, 69, 70, 71, 72, 73, 74, 74, 75,
+   76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91,
+   92, 93, 94, 95, 96, 97, 98, 99,100,101,102,104,105,106,107,108,
+  109,110,111,113,114,115,116,117,118,120,121,122,123,125,126,127
+};
 
 // Constructor for use with hardware SPI (specific clock/data pins):
 LPD8806::LPD8806(uint16_t n) {
@@ -100,8 +119,8 @@ LPD8806::LPD8806(void) {
 
 // Activate hard/soft SPI as appropriate:
 void LPD8806::begin(void) {
-  if(hardwareSPI == true) startSPI();
-  else                    startBitbang();
+  if (hardwareSPI) startSPI();
+    else startBitbang();
   begun = true;
 }
 
@@ -119,7 +138,6 @@ void LPD8806::updatePins(void) {
 
 // Change pin assignments post-constructor, using arbitrary pins:
 void LPD8806::updatePins(uint8_t dpin, uint8_t cpin) {
-
   datapin     = dpin;
   clkpin      = cpin;
   clkport = dataport = 0;
@@ -132,12 +150,11 @@ void LPD8806::updatePins(uint8_t dpin, uint8_t cpin) {
   datapinmask = digitalPinToBitMask(dpin);
 #endif
 
-  if(begun == true) { // If begin() was previously invoked...
+  if (begun) { // If begin() was previously invoked...
     // If previously using hardware SPI, turn that off:
-    if(hardwareSPI == true) SPI.end();
+    if (hardwareSPI) SPI.end();
     startBitbang(); // Regardless, now enable 'soft' SPI outputs
   } // Otherwise, pins are not set to outputs until begin() is called.
-
   // Note: any prior clock/data pin directions are left as-is and are
   // NOT restored as inputs!
 
@@ -189,7 +206,8 @@ void LPD8806::startBitbang() {
   } else {
     // can't do low level bitbanging, revert to digitalWrite
     digitalWrite(datapin, LOW);
-    for(uint16_t i=((numLEDs+31)/32)*8; i>0; i--) {
+    // Send initial latch/reset
+    for (uint16_t i=((numLEDs+31)/32)*8; i>0; i--) {
       digitalWrite(clkpin, HIGH);
       digitalWrite(clkpin, LOW);
     }
@@ -198,15 +216,17 @@ void LPD8806::startBitbang() {
 
 // Change strip length (see notes with empty constructor, above):
 void LPD8806::updateLength(uint16_t n) {
-  uint8_t latchBytes = (n + 31) / 32;
-  if(pixels != NULL) free(pixels); // Free existing data (if any)
-  numLEDs    = n;
-  n         *= 3; // 3 bytes per pixel
-  numBytes   = n + latchBytes;
-  if(NULL != (pixels = (uint8_t *)malloc(numBytes))) { // Alloc new data
-    memset( pixels   , 0x80, n);          // Init to RGB 'off' state
-    memset(&pixels[n], 0   , latchBytes); // Clear latch bytes
-  } else numLEDs = numBytes = 0; // else malloc failed
+  numLEDs  = n;
+  numBytes = numLEDs * 3; // 3 bytes per pixel
+  latchBytes = (n + 31) / 32;
+  // Free existing data (if any)
+  free(pixels);
+
+  // Allocate and zero new data
+  if (NULL == (pixels = (uint8_t *)calloc(numBytes, 1))) {
+    // Allocation failed!
+    numLEDs = numBytes = latchBytes = 0; 
+  }
   // 'begun' state does not change -- pins retain prior modes
 }
 
@@ -219,78 +239,117 @@ uint16_t LPD8806::numPixels(void) {
 // to sign an NDA or something stupid like that, but we reverse engineered
 // this from a strip controller and it seems to work very nicely!
 void LPD8806::show(void) {
-  uint8_t  *ptr = pixels;
-  uint16_t i    = numBytes;
+  uint8_t *ptr = pixels;
+  uint16_t i = numBytes + latchBytes;
+  uint8_t bit, val;
 
-  // This doesn't need to distinguish among individual pixel color
-  // bytes vs. latch data, etc.  Everything is laid out in one big
-  // flat buffer and issued the same regardless of purpose.
-  if(hardwareSPI) {
-    while(i--) {
-#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328P__) || defined (__AVR_ATmega328__) || defined(__AVR_ATmega8__) || (__AVR_ATmega1281__) || defined(__AVR_ATmega2561__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__)
-      while(!(SPSR & (1<<SPIF))); // Wait for prior byte out
-      SPDR = *ptr++;              // Issue new byte
-#else
-      SPI.transfer(*ptr++);
-#endif
+  while (i) {
+    if (i-- > latchBytes) {
+      // color byte with high bit set
+      val = 0x00 | (*ptr++); //testing
+      //val = 0x80 | pgm_read_byte(&gammaTable[*ptr++]);
+    } else {
+      // latch byte
+      val = 0;
     }
-  } else {
-    uint8_t p, bit;
-
-    while(i--) {
-      p = *ptr++;
-      for(bit=0x80; bit; bit >>= 1) {
-	if (dataport != 0) {
-	  if(p & bit) *dataport |=  datapinmask;
-	  else        *dataport &= ~datapinmask;
-	  *clkport |=  clkpinmask;
-	  *clkport &= ~clkpinmask;
-	} else {
-	  if (p&bit) digitalWrite(datapin, HIGH);
-	  else digitalWrite(datapin, LOW);
-	  digitalWrite(clkpin, HIGH);
-	  digitalWrite(clkpin, LOW);
-	}
+    if (hardwareSPI) {
+#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328P__) || defined (__AVR_ATmega328__) || defined(__AVR_ATmega8__) || (__AVR_ATmega1281__) || defined(__AVR_ATmega2561__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__)
+      while (!(SPSR & (1 << SPIF))); // Wait for prior byte out
+      SPDR = val; // Issue new byte
+#else
+      SPI.transfer(val);
+#endif
+    } else {
+      for (bit=0x80; bit; bit >>= 1) {
+        if (dataport == 0) {
+          // bitbang
+          if (val & bit) {
+            digitalWrite(datapin, HIGH);
+          } else {
+            digitalWrite(datapin, LOW);
+          }
+          digitalWrite(clkpin, HIGH);
+          digitalWrite(clkpin, LOW);
+        } else {
+          // SPI
+          if (val & bit) {
+            *dataport |= datapinmask;
+          } else {
+            *dataport &= ~datapinmask;
+          }
+          *clkport |=  clkpinmask;
+          *clkport &= ~clkpinmask;
+        }
       }
     }
   }
 }
 
-// Convert separate R,G,B into combined 32-bit GRB color:
-uint32_t LPD8806::Color(byte r, byte g, byte b) {
-  return ((uint32_t)(g | 0x80) << 16) |
-         ((uint32_t)(r | 0x80) <<  8) |
-                     b | 0x80 ;
+// Clear all pixels
+void LPD8806::clear(void) {
+  memset(pixels, 0x00, numLEDs * 3);
 }
 
-// Set pixel color from separate 7-bit R, G, B components:
-void LPD8806::setPixelColor(uint16_t n, uint8_t r, uint8_t g, uint8_t b) {
-  if(n < numLEDs) { // Arrays are 0-indexed, thus NOT '<='
-    uint8_t *p = &pixels[n * 3];
-    *p++ = g | 0x80; // Strip color order is GRB,
-    *p++ = r | 0x80; // not the more common RGB,
-    *p++ = b | 0x80; // so the order here is intentional; don't "fix"
-  }
+// Convert separate R, G, B into combined RGB
+uint32_t LPD8806::Color(uint8_t r, uint8_t g, uint8_t b) {
+  return (uint32_t)r << 16 |
+         (uint32_t)g <<  8 |
+         (uint32_t)b;
 }
 
-// Set pixel color from 'packed' 32-bit GRB (not RGB) value:
-void LPD8806::setPixelColor(uint16_t n, uint32_t c) {
-  if(n < numLEDs) { // Arrays are 0-indexed, thus NOT '<='
-    uint8_t *p = &pixels[n * 3];
-    *p++ = (c >> 16) | 0x80;
-    *p++ = (c >>  8) | 0x80;
-    *p++ =  c        | 0x80;
-  }
-}
-
-// Query color from previously-set pixel (returns packed 32-bit GRB value)
+// Query color from previously-set pixel (returns 32-bit RGB value)
 uint32_t LPD8806::getPixelColor(uint16_t n) {
-  if(n < numLEDs) {
-    uint16_t ofs = n * 3;
-    return ((uint32_t)(pixels[ofs    ] & 0x7f) << 16) |
-           ((uint32_t)(pixels[ofs + 1] & 0x7f) <<  8) |
-            (uint32_t)(pixels[ofs + 2] & 0x7f);
+  if (n < numLEDs) {
+    return ((uint32_t)pixels[(n*3)+0] <<  8) |
+           ((uint32_t)pixels[(n*3)+1] << 16) |
+            (uint32_t)pixels[(n*3)+2];
   }
-
   return 0; // Pixel # is out of bounds
+}
+
+// Set pixel color from 32-bit RGB value -- high byte is ignored
+void LPD8806::setPixelColor(uint16_t pos, uint32_t color) {
+  if (pos < numLEDs) {
+    uint8_t *p = &pixels[pos * 3];
+    *p++ = color >> 8;  // g
+    *p++ = color >> 16; // r
+    *p++ = color;       // b
+  }
+}
+
+// Set pixel color from separate R, G, B components
+void LPD8806::setPixelColor(uint16_t n, uint8_t r, uint8_t g, uint8_t b) {
+  if (n < numLEDs) {
+    uint8_t *p = &pixels[n * 3];
+    *p++ = g;
+    *p++ = r;
+    *p++ = b;
+  }
+}
+
+// Blend new color (32-bit RGB) with existing color at specified position
+void LPD8806::blendPixel(uint16_t pos, uint32_t color, uint8_t alpha) {
+  if (alpha > 0 && pos < numLEDs) {
+    uint8_t* sp = (uint8_t*) &color;
+    uint8_t* dp = &pixels[pos * 3];
+    *(dp+1) = (255 - (255 - *(dp+1)) * (255 - (*sp++ * alpha / 255)) / 255); // r
+    *(dp+0) = (255 - (255 - *(dp+0)) * (255 - (*sp++ * alpha / 255)) / 255); // g
+    *(dp+2) = (255 - (255 - *(dp+2)) * (255 - (*sp++ * alpha / 255)) / 255); // b
+  }
+}
+
+// Render a "pixel" between two pixels, 256 subpixels per pixel
+// Position ranges from 0 to (numLEDs >> 8).
+// Note that the last 256 subpixels in this range "wrap around" to pixel #0.
+// This is so that subpixel 0 = pixel 0.
+// If you don't want wrapping, don't use the last 256 subpixels!
+void LPD8806::blendSubpixel(uint32_t pos, uint32_t color, uint8_t alpha) {
+  uint8_t a = (alpha * (pos % 256)) / 255;
+  blendPixel( (pos >> 8)      % numLEDs, color, 255 - a);
+  /* We get a slight boundary problem between full pixels which results in a
+  pixel being shown with a=255 twice in a row (e.g. at pos=255 and pos=256).
+  Since this would make any animations hitch briefly, offset the second pixel
+  by -1 so the hitch happens (invisibly) at a=0 instead. */
+  if (a > 1) a--;
+  blendPixel(((pos >> 8) + 1) % numLEDs, color, a);
 }
